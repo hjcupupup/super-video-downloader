@@ -129,13 +129,20 @@ android {
     val isBundleTask =
         project.gradle.startParameter.taskNames.any { it.contains("bundle", ignoreCase = true) }
 
+    // Opt-in trial package so a side-loaded test APK does not replace the
+    // original app or its cookies, history, and downloads.
+    val trialBuild = (project.findProperty("trialBuild") as? String)?.toBoolean() == true ||
+        System.getenv("TRIAL_BUILD") == "true"
+
     // Default Config
     defaultConfig {
-        applicationId = "com.myAllVideoBrowser"
+        applicationId = if (trialBuild) "com.myAllVideoBrowser.trial" else "com.myAllVideoBrowser"
         minSdk = libs.versions.minSdk.get().toInt()
         targetSdk = libs.versions.targetSdk.get().toInt()
-        versionCode = 509
-        versionName = "0.9.1.4"
+        versionCode = if (trialBuild) 510 else 509
+        versionName = if (trialBuild) "0.9.1.4-tabs-trial" else "0.9.1.4"
+        manifestPlaceholders["appLabel"] = if (trialBuild) "SVD Tabs Trial" else "@string/app_name"
+        buildConfigField("boolean", "TRIAL_BUILD", trialBuild.toString())
 
         if (isSingleAbiRequested) {
             splits {
@@ -202,9 +209,6 @@ android {
 
     // Test Options
     testOptions {
-        unitTests.all {
-            it.exclude("**/*")
-        }
         unitTests {
             isIncludeAndroidResources = true
             isReturnDefaultValues = true

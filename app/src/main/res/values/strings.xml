@@ -179,6 +179,16 @@
     <string name="accessibility_refresh">Refresh</string>
     <string name="accessibility_stop">Stop</string>
     <string name="accessibility_close">Close</string>
+    <string name="open_in_new_tab">Open in new tab</string>
+    <string name="open_in_background_tab">Open in background tab</string>
+    <string name="opened_in_background">Opened in a background tab</string>
+    <string name="new_tab_title">New tab</string>
+    <string name="tabs_switcher">Tabs</string>
+    <string name="popup_blocked">Blocked pop-up</string>
+    <string name="press_back_again_to_exit">Press back again to exit</string>
+    <string name="trial_build_notice">Unofficial multi-tab trial build. Not an upstream release. Ad blocking, downloads, and the original license are unchanged.</string>
+    <string name="accessibility_tabs">Tabs</string>
+    <string name="accessibility_new_tab">New tab</string>
     <string name="currentVersion">Current Version</string>
     <string name="checkingForUpdates">Checking for updates…</string>
     <string name="developer">Developer</string>

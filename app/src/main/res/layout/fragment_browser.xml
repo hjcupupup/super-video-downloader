@@ -13,13 +13,79 @@
         android:layout_width="match_parent"
         android:layout_height="match_parent">
 
-        <com.myAllVideoBrowser.ui.main.home.browser.CustomViewPager2
-            android:id="@+id/view_pager"
+        <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="match_parent"
-            android:importantForAccessibility="no"
-            app:currentItem="@{viewModel.currentTab}"
-            app:items="@{viewModel.tabs}" />
+            android:orientation="vertical">
+
+            <com.myAllVideoBrowser.ui.main.home.browser.CustomViewPager2
+                android:id="@+id/view_pager"
+                android:layout_width="match_parent"
+                android:layout_height="0dp"
+                android:layout_weight="1"
+                android:importantForAccessibility="no"
+                app:currentItem="@{viewModel.currentTab}"
+                app:items="@{viewModel.tabs}" />
+
+            <LinearLayout
+                android:id="@+id/browser_tab_bar"
+                android:layout_width="match_parent"
+                android:layout_height="52dp"
+                android:background="?attr/colorSurfaceContainer"
+                android:gravity="center_vertical"
+                android:orientation="horizontal"
+                android:paddingHorizontal="4dp">
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/browser_back_button"
+                    style="@style/Widget.Material3.Button.IconButton"
+                    android:layout_width="48dp"
+                    android:layout_height="48dp"
+                    android:contentDescription="@string/accessibility_back"
+                    android:onClick="@{() -> viewModel.onBottomBackClicked()}"
+                    app:icon="@drawable/arrow_back24px"
+                    app:iconTint="?attr/colorOnSurface" />
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/browser_forward_button"
+                    style="@style/Widget.Material3.Button.IconButton"
+                    android:layout_width="48dp"
+                    android:layout_height="48dp"
+                    android:contentDescription="@string/accessibility_forward"
+                    android:onClick="@{() -> viewModel.onBottomForwardClicked()}"
+                    app:icon="@drawable/arrow_forward24px"
+                    app:iconTint="?attr/colorOnSurface" />
+
+                <Space
+                    android:layout_width="0dp"
+                    android:layout_height="1dp"
+                    android:layout_weight="1" />
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/browser_tabs_button"
+                    style="@style/Widget.Material3.Button.TonalButton"
+                    android:layout_width="wrap_content"
+                    android:layout_height="40dp"
+                    android:contentDescription="@string/accessibility_tabs"
+                    android:minWidth="72dp"
+                    android:onClick="@{() -> viewModel.onShowTabsClicked()}"
+                    android:text="1"
+                    app:icon="@drawable/tab_group_24px"
+                    app:iconGravity="textStart"
+                    app:iconPadding="6dp"
+                    app:iconTint="?attr/colorOnSecondaryContainer" />
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/browser_new_tab_button"
+                    style="@style/Widget.Material3.Button.IconButton"
+                    android:layout_width="48dp"
+                    android:layout_height="48dp"
+                    android:contentDescription="@string/accessibility_new_tab"
+                    android:onClick="@{() -> viewModel.onNewTabClicked()}"
+                    app:icon="@drawable/add_24px"
+                    app:iconTint="?attr/colorOnSurface" />
+            </LinearLayout>
+        </LinearLayout>
 
         <com.google.android.material.navigation.NavigationView
             android:id="@+id/navigation_view"
@@ -47,12 +113,24 @@
                 <androidx.recyclerview.widget.RecyclerView
                     android:id="@+id/tabs_list"
                     android:layout_width="match_parent"
-                    android:layout_height="match_parent"
+                    android:layout_height="0dp"
+                    android:layout_weight="1"
                     android:clipToPadding="false"
-                    android:paddingBottom="16dp"
+                    android:paddingBottom="8dp"
                     android:contentDescription="@string/tabs"
                     app:items="@{viewModel.tabs}"
                     app:selectedTab="@{viewModel.currentTab}" />
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/drawer_new_tab"
+                    style="@style/Widget.Material3.Button.TonalButton"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_margin="16dp"
+                    android:contentDescription="@string/accessibility_new_tab"
+                    android:onClick="@{() -> viewModel.onNewTabClicked()}"
+                    android:text="@string/new_tab"
+                    app:icon="@drawable/add_24px" />
 
             </LinearLayout>
         </com.google.android.material.navigation.NavigationView>

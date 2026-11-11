@@ -41,6 +41,7 @@ import com.myAllVideoBrowser.ui.main.home.MainActivity
 import com.myAllVideoBrowser.ui.main.home.MainViewModel
 import com.myAllVideoBrowser.ui.main.home.browser.detectedVideos.GlobalVideoDetectionModel
 import com.myAllVideoBrowser.ui.main.home.browser.homeTab.BrowserHomeFragment
+import com.myAllVideoBrowser.ui.main.home.browser.tabs.BackAction
 import com.myAllVideoBrowser.ui.main.home.browser.webTab.WebTab
 import com.myAllVideoBrowser.ui.main.home.browser.webTab.WebTabFragment
 import com.myAllVideoBrowser.ui.main.progress.WrapContentLinearLayoutManager
@@ -77,7 +78,7 @@ interface HistoryProvider {
 }
 
 interface WorkerEventProvider {
-    fun getWorkerM3u8MpdEvent(): MutableLiveData<DownloadButtonState>
+    fun getWorkerM3u8MpdEvent(): MutableLiveData<WorkerDetectionEvent>
 
     fun getWorkerMP4Event(): MutableLiveData<DownloadButtonState>
 }
@@ -95,6 +96,9 @@ class BrowserFragment : BaseFragment(), BrowserServicesProvider {
 
     companion object {
         fun newInstance() = BrowserFragment()
+        const val PAUSE_MEDIA_JS =
+            "(function(){var nodes=document.querySelectorAll('video,audio');for(var i=0;i<nodes.length;i++){try{nodes[i].pause();}catch(e){}}})();"
+
         var DESKTOP_USER_AGENT =
             "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 
@@ -146,8 +150,9 @@ class BrowserFragment : BaseFragment(), BrowserServicesProvider {
         Observable.OnPropertyChangedCallback() {
         override fun onPropertyChanged(sender: Observable?, propertyId: Int) {
             lifecycleScope.launch(Dispatchers.Main) {
+                val state = videoDetectionModel.downloadButtonState.get() ?: return@launch
                 browserViewModel.workerM3u8MpdEvent.value =
-                    videoDetectionModel.downloadButtonState.get()
+                    browserViewModel.nextWorkerDetection(state)
             }
         }
     }
@@ -356,6 +361,7 @@ class BrowserFragment : BaseFragment(), BrowserServicesProvider {
         handleCloseWebTabEventEvent()
         handleOpenNavDrawerEvent()
         handleUpdateWebTabEventEvent()
+        handleBrowserBarEvents()
         checkIsPowerSaveMode()
     }
 
@@ -371,7 +377,7 @@ class BrowserFragment : BaseFragment(), BrowserServicesProvider {
         return this.historyModel
     }
 
-    override fun getWorkerM3u8MpdEvent(): MutableLiveData<DownloadButtonState> {
+    override fun getWorkerM3u8MpdEvent(): MutableLiveData<WorkerDetectionEvent> {
         return browserViewModel.workerM3u8MpdEvent
     }
 
@@ -396,52 +402,229 @@ class BrowserFragment : BaseFragment(), BrowserServicesProvider {
 
     private fun handlePressWebTabEvent() {
         browserViewModel.selectWebTabEvent.observe(viewLifecycleOwner) { webTab ->
-            val index = browserViewModel.tabs.get()?.indexOf(webTab) ?: 0
-            browserViewModel.currentTab.set(index.coerceAtLeast(0))
+            browserViewModel.selectTab(webTab)
+            showCurrentTab()
+            if (dataBinding.drawerLayout.isDrawerOpen(GravityCompat.START)) {
+                dataBinding.drawerLayout.close()
+            }
         }
     }
 
-    // TODO: Show dialog with variants: "Open in New Tab", "Load in Current Tab", "Block", "Don't show again"
     private fun handleOpenTabEvent() {
         browserViewModel.openPageEvent.observe(viewLifecycleOwner) { webTab ->
-            val newList = browserViewModel.tabs.get()?.plus(webTab) ?: emptyList()
-            browserViewModel.tabs.set(newList)
-            val index = newList.indexOf(webTab)
-            browserViewModel.currentTab.set(index.coerceAtLeast(0))
+            if (webTab.id == WebTab.HOME_TAB.id) {
+                browserViewModel.selectTab(WebTab.HOME_TAB)
+                showCurrentTab()
+                return@observe
+            }
+            browserViewModel.addTab(webTab)
+            showCurrentTab()
         }
     }
 
     private fun handleCloseWebTabEventEvent() {
         browserViewModel.closePageEvent.observe(viewLifecycleOwner) { webTab ->
-            val tabs =
-                browserViewModel.tabs.get()?.toMutableList() ?: mutableListOf(WebTab.HOME_TAB)
-            val tabToClose = tabs.find { it.id == webTab.id }
-            val index = tabs.indexOf(tabToClose)
-            if (index in tabs.indices && index != HOME_TAB_INDEX) {
-                tabs.removeAt(index)
-            }
-
-            if (browserViewModel.currentTab.get() == index) {
-                val newIndex = (index - 1).coerceAtLeast(0)
-                browserViewModel.currentTab.set(newIndex)
-            }
-
-            browserViewModel.tabs.set(tabs)
+            if (webTab.isHome()) return@observe
+            releaseClosedTab(webTab)
+            browserViewModel.closeTab(webTab)
+            showCurrentTab()
         }
     }
 
     private fun handleUpdateWebTabEventEvent() {
-        browserViewModel.updateWebTabEvent.observe(viewLifecycleOwner) { webTab ->
-            val tabs = browserViewModel.tabs.get()?.toMutableList()
-            val tabToUpdate = tabs?.find { it.id == webTab.id }
-            val updateIndex = tabs?.indexOf(tabToUpdate)
+        browserViewModel.updateWebTabEvent.observe(viewLifecycleOwner) { incoming ->
+            val existing = browserViewModel.findTab(incoming.id) ?: return@observe
+            incoming.getFavicon()?.let { existing.setFavicon(it) }
+            incoming.getWebView()?.let { existing.setWebView(it) }
+            if (incoming.getTitle().isNotEmpty()) {
+                existing.setTitle(incoming.getTitle())
+            }
+            if (incoming.getUrl().startsWith("http")) {
+                browserViewModel.onNavigated(existing.id, incoming.getUrl(), incoming.getTitle())
+            } else {
+                browserViewModel.tabs.set(browserViewModel.tabs.get().orEmpty().toList())
+            }
+            dataBinding.viewPager.currentItem = browserViewModel.currentTab.get()
+        }
+    }
 
-            if (updateIndex != null && updateIndex in tabs.indices) {
-                tabs[updateIndex] = webTab
+    private fun handleBrowserBarEvents() {
+        browserViewModel.bottomBackEvent.observe(viewLifecycleOwner) {
+            handleBrowserBack(fromSystem = false)
+        }
+        browserViewModel.bottomForwardEvent.observe(viewLifecycleOwner) {
+            handleBrowserForward()
+        }
+        browserViewModel.showTabsEvent.observe(viewLifecycleOwner) {
+            showTabsSheet()
+        }
+        browserViewModel.newTabEvent.observe(viewLifecycleOwner) {
+            if (dataBinding.drawerLayout.isDrawerOpen(GravityCompat.START)) {
+                dataBinding.drawerLayout.close()
+            }
+            openBlankTab()
+        }
+        dataBinding.browserTabsButton.text = browserViewModel.tabCount.get().toString()
+        browserViewModel.tabCount.addOnPropertyChangedCallback(object :
+            Observable.OnPropertyChangedCallback() {
+            override fun onPropertyChanged(sender: Observable?, propertyId: Int) {
+                if (!isAdded) return
+                dataBinding.browserTabsButton.text = browserViewModel.tabCount.get().toString()
+            }
+        })
+    }
+
+    fun openBlankTab() {
+        val tab = WebTab("", getString(R.string.new_tab_title))
+        tab.pendingAddressFocus = true
+        browserViewModel.openPageEvent.value = tab
+    }
+
+    fun handleBrowserBack(fromSystem: Boolean) {
+        if (requireActivity().supportFragmentManager.backStackEntryCount > 0) {
+            requireActivity().supportFragmentManager.popBackStack()
+            return
+        }
+        val resumedTab = childFragmentManager.fragments
+            .filterIsInstance<WebTabFragment>()
+            .firstOrNull { it.isResumed }
+        if (resumedTab?.hideCustomViewIfShowing() == true) {
+            return
+        }
+
+        val rootPagerIndex = mainActivity.mainViewModel.currentItem.get() ?: 0
+        if (rootPagerIndex > 0) {
+            mainActivity.mainViewModel.currentItem.set(HOME_TAB_INDEX)
+            return
+        }
+
+        val current = browserViewModel.currentWebTab()
+        val webView = current?.getWebView()
+        val canGoBack = when {
+            current == null || current.isHome() -> false
+            webView != null -> webView.canGoBack()
+            else -> null
+        }
+        when (browserViewModel.backAction(current?.id, canGoBack)) {
+            BackAction.HISTORY -> {
+                if (webView != null && webView.canGoBack()) {
+                    current?.id?.let { browserViewModel.tabStores.detection(it)?.cancelAllCheckJobs() }
+                    webView.goBack()
+                }
             }
 
-            browserViewModel.tabs.set(tabs ?: emptyList())
+            BackAction.CLOSE_TAB, BackAction.CLOSE_LAST_TO_HOME -> {
+                if (current != null) {
+                    browserViewModel.closePageEvent.value = current
+                }
+            }
+
+            BackAction.EXIT_APP -> {
+                if (!fromSystem) return
+                if (backPressedOnce) {
+                    requireActivity().finish()
+                    return
+                }
+                backPressedOnce = true
+                Toast.makeText(
+                    requireContext(),
+                    R.string.press_back_again_to_exit,
+                    Toast.LENGTH_SHORT
+                ).show()
+                Handler(Looper.getMainLooper()).postDelayed({
+                    backPressedOnce = false
+                }, 2000)
+            }
         }
+    }
+
+    fun handleBrowserForward() {
+        val current = browserViewModel.currentWebTab() ?: return
+        val webView = current.getWebView() ?: return
+        if (webView.canGoForward()) {
+            browserViewModel.tabStores.detection(current.id)?.cancelAllCheckJobs()
+            webView.goForward()
+        }
+    }
+
+    /**
+     * Drop the closed tab's WebView and its detection ViewModel.
+     * The shared CookieManager and WorkManager downloads are left alone.
+     */
+    private fun releaseClosedTab(webTab: WebTab) {
+        webTab.webViewGeneration++
+        val webView = webTab.getWebView()
+        webTab.setWebView(null)
+        webTab.savedState = null
+        if (webView != null) {
+            (webView.parent as? ViewGroup)?.removeView(webView)
+            webView.onPause()
+            try {
+                webView.destroy()
+            } catch (_: Throwable) {
+            }
+        }
+        browserViewModel.markWebViewLive(webTab.id, false)
+        browserViewModel.tabStores.detection(webTab.id)?.cancelAllCheckJobs()
+        browserViewModel.tabStores.clear(webTab.id)
+    }
+
+    private fun showCurrentTab() {
+        val index = browserViewModel.currentTab.get().coerceAtLeast(0)
+        dataBinding.viewPager.currentItem = index
+        applyMediaPolicy()
+    }
+
+    private fun applyMediaPolicy() {
+        val currentId = browserViewModel.currentWebTab()?.id
+        browserViewModel.tabs.get().orEmpty().forEach { tab ->
+            val webView = tab.getWebView() ?: return@forEach
+            if (tab.id == currentId) {
+                webView.onResume()
+            } else {
+                pauseBackgroundWebView(webView)
+            }
+        }
+    }
+
+    private fun pauseBackgroundWebView(webView: android.webkit.WebView) {
+        webView.onPause()
+        // onPause does not reliably stop HTML media, and pauseTimers() would freeze every tab.
+        webView.evaluateJavascript(PAUSE_MEDIA_JS, null)
+    }
+
+    private fun showTabsSheet() {
+        if (!isAdded) return
+        val dialog = com.google.android.material.bottomsheet.BottomSheetDialog(requireContext())
+        val sheet = layoutInflater.inflate(R.layout.bottom_sheet_browser_tabs, null)
+        val list = sheet.findViewById<androidx.recyclerview.widget.RecyclerView>(R.id.sheet_tabs_list)
+        var sheetAdapter: WebTabsAdapter? = null
+        val sheetListener = object : WebTabsListener {
+            override fun onCloseTabClicked(webTab: WebTab) {
+                browserViewModel.closePageEvent.value = webTab
+                val updated = browserViewModel.tabs.get().orEmpty()
+                sheetAdapter?.setData(updated)
+                sheetAdapter?.setSelectedTab(browserViewModel.currentTab.get())
+                if (updated.size <= 1) {
+                    dialog.dismiss()
+                }
+            }
+
+            override fun onSelectTabClicked(webTab: WebTab) {
+                browserViewModel.selectWebTabEvent.value = webTab
+                dialog.dismiss()
+            }
+        }
+        sheetAdapter = WebTabsAdapter(browserViewModel.tabs.get().orEmpty(), sheetListener)
+        sheetAdapter?.setSelectedTab(browserViewModel.currentTab.get())
+        list.layoutManager = LinearLayoutManager(requireContext())
+        list.adapter = sheetAdapter
+        sheet.findViewById<View>(R.id.sheet_new_tab).setOnClickListener {
+            dialog.dismiss()
+            openBlankTab()
+        }
+        dialog.setContentView(sheet)
+        dialog.show()
     }
 
     private fun handleOpenNavDrawerEvent() {
@@ -469,23 +652,7 @@ class BrowserFragment : BaseFragment(), BrowserServicesProvider {
     }
 
     private fun onBackPressed() {
-        val rootPagerIndex = mainActivity.mainViewModel.currentItem.get() ?: 0
-        if (rootPagerIndex > 0) {
-            mainActivity.mainViewModel.currentItem.set(HOME_TAB_INDEX)
-        }
-        if (rootPagerIndex == HOME_TAB_INDEX) {
-            if (backPressedOnce) {
-                requireActivity().finish()
-                return
-            }
-
-            backPressedOnce = true
-            Toast.makeText(requireContext(), "Press Back Again to exit", Toast.LENGTH_SHORT).show()
-
-            Handler(Looper.getMainLooper()).postDelayed({
-                backPressedOnce = false
-            }, 2000)
-        }
+        handleBrowserBack(fromSystem = true)
     }
 
     private val onGoThroughListener = object : OnGoThroughListener {

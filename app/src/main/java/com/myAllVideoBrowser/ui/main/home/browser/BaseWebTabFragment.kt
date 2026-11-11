@@ -287,9 +287,14 @@ abstract class BaseWebTabFragment : BaseFragment() {
         val projectSupportString = requireContext().getString(R.string.supportString)
 
 
+        val trialNotice = if (BuildConfig.TRIAL_BUILD) {
+            requireContext().getString(R.string.trial_build_notice) + "\n\n"
+        } else {
+            ""
+        }
         val dialog = MaterialAlertDialogBuilder(requireContext())
             .setTitle(R.string.about)
-            .setMessage("$currentVersionString: $currentVersion\n$checkingUpdatesString")
+            .setMessage("$trialNotice$currentVersionString: $currentVersion\n$checkingUpdatesString")
             .setPositiveButton(R.string.ok, null)
             .setNeutralButton(developerString) { _, _ ->
                 val intent = Intent(Intent.ACTION_VIEW, developerUrl.toUri())
@@ -320,12 +325,12 @@ abstract class BaseWebTabFragment : BaseFragment() {
                     val latestVersion = redirectedUrl.substringAfterLast("/")
 
                     withContext(Dispatchers.Main) {
-                        dialog.setMessage("$currentVersionString: $currentVersion\n$latestVersionString: $latestVersion\n\n$developerString: $developerUrl\n\n$projectSupportString: $btcAddress")
+                        dialog.setMessage("$trialNotice$currentVersionString: $currentVersion\n$latestVersionString: $latestVersion\n\n$developerString: $developerUrl\n\n$projectSupportString: $btcAddress")
                     }
                 }
             } catch (_: Exception) {
                 withContext(Dispatchers.Main) {
-                    dialog.setMessage("$currentVersionString: $currentVersion\n$checkingFailedString.\n\n$developerString: $developerUrl\n\n$projectSupportString: $btcAddress")
+                    dialog.setMessage("$trialNotice$currentVersionString: $currentVersion\n$checkingFailedString.\n\n$developerString: $developerUrl\n\n$projectSupportString: $btcAddress")
                 }
             }
         }

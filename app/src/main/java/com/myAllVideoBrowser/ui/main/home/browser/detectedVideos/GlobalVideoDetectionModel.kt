@@ -48,6 +48,7 @@ class GlobalVideoDetectionModel @Inject constructor(
     }
 
     override fun start() {
+        markSessionStarted()
         downloadButtonState.addOnPropertyChangedCallback(butonStateCallBack)
     }
 
@@ -234,6 +235,7 @@ class GlobalVideoDetectionModel @Inject constructor(
             AppLogger.d("PUSHING $newInfo to list")
             nextSet.add(newInfo)
             detectedVideosList.set(nextSet)
+            onVideoAccepted?.invoke(newInfo)
 
             // Cancel previous pending UI update to avoid flickering
             pushJob?.cancel()
