@@ -6,6 +6,7 @@ import android.net.Uri
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.Message
 import android.text.Editable
 import android.text.TextWatcher
 import android.view.LayoutInflater
@@ -50,6 +51,7 @@ import com.myAllVideoBrowser.ui.main.home.browser.DownloadButtonStateCanDownload
 import com.myAllVideoBrowser.ui.main.home.browser.DownloadButtonStateCanNotDownload
 import com.myAllVideoBrowser.ui.main.home.browser.DownloadButtonStateLoading
 import com.myAllVideoBrowser.ui.main.home.browser.HOME_TAB_INDEX
+import com.myAllVideoBrowser.ui.main.home.browser.tabs.LongPressLinkResolver
 import com.myAllVideoBrowser.ui.main.home.browser.HistoryProvider
 import com.myAllVideoBrowser.ui.main.home.browser.PageTabProvider
 import com.myAllVideoBrowser.ui.main.home.browser.TAB_INDEX_KEY
@@ -489,26 +491,10 @@ class WebTabFragment : BaseWebTabFragment() {
                 userAgentString = BrowserFragment.DESKTOP_USER_AGENT
             }
         }
-        currentWebView.setOnCreateContextMenuListener { menu, v, _ ->
-            val webView = v as WebView
-            val hitTestResult = webView.hitTestResult
-
-            if (hitTestResult.type == WebView.HitTestResult.SRC_ANCHOR_TYPE ||
-                hitTestResult.type == WebView.HitTestResult.SRC_IMAGE_ANCHOR_TYPE
-            ) {
-                val url = hitTestResult.extra
-                if (!url.isNullOrBlank()) {
-                    menu.setHeaderTitle(url)
-                    menu.add(0, 1, 0, getString(R.string.open_in_new_tab)).setOnMenuItemClickListener {
-                        openLinkFromPage(url, background = false)
-                        true
-                    }
-                    menu.add(0, 2, 1, getString(R.string.open_in_background_tab)).setOnMenuItemClickListener {
-                        openLinkFromPage(url, background = true)
-                        true
-                    }
-                }
-            }
+        currentWebView.isLongClickable = true
+        currentWebView.setOnLongClickListener { view ->
+            val webView = view as WebView
+            resolveLongPress(webView)
         }
 
         currentWebView.addJavascriptInterface(
@@ -746,6 +732,103 @@ class WebTabFragment : BaseWebTabFragment() {
         }
     }
 
+    /**
+     * Hit-test extra for an image inside a link is the bitmap address. The page
+     * address arrives asynchronously from the focused anchor.
+     */
+    private fun resolveLongPress(webView: WebView): Boolean {
+        val hit = webView.hitTestResult
+        val type = hit.type
+        if (type == WebView.HitTestResult.UNKNOWN_TYPE ||
+            type == WebView.HitTestResult.EDIT_TEXT_TYPE
+        ) {
+            return false
+        }
+        val extra = hit.extra
+        var focusHref: String? = null
+        var focusSrc: String? = null
+        var imageRef: String? = null
+        var gotHref = false
+        var shown = false
+        fun publish() {
+            if (shown || !gotHref || !isAdded) return
+            shown = true
+            val target = LongPressLinkResolver.resolve(type, extra, focusHref, focusSrc, imageRef)
+            com.myAllVideoBrowser.util.AppLogger.d(
+                "LONG_PRESS type=$type extra=$extra href=$focusHref src=$focusSrc imageRef=$imageRef page=${target.pageUrl} image=${target.imageUrl}"
+            )
+            if (!target.offersPage && !target.offersImage) return
+            showLongPressMenu(webView, target)
+        }
+        val handler = object : Handler(Looper.getMainLooper()) {
+            override fun handleMessage(msg: Message) {
+                when (msg.what) {
+                    1 -> {
+                        focusHref = msg.data?.getString("url")
+                        focusSrc = msg.data?.getString("src")
+                        gotHref = true
+                        val waitingForBareImage = type == WebView.HitTestResult.IMAGE_TYPE &&
+                            focusSrc.isNullOrBlank() && imageRef.isNullOrBlank()
+                        if (!waitingForBareImage) publish()
+                    }
+                    2 -> {
+                        imageRef = msg.data?.getString("url")
+                        if (gotHref) publish()
+                    }
+                }
+            }
+        }
+        webView.requestFocusNodeHref(handler.obtainMessage(1))
+        webView.requestImageRef(handler.obtainMessage(2))
+        handler.postDelayed({
+            if (!gotHref) {
+                gotHref = true
+                publish()
+            }
+        }, 700)
+        return true
+    }
+
+    private fun showLongPressMenu(webView: WebView, target: LongPressLinkResolver.Target) {
+        val pageUrl = target.pageUrl
+        val imageUrl = target.imageUrl
+        val labels = mutableListOf<String>()
+        val actions = mutableListOf<() -> Unit>()
+        if (target.offersPage && pageUrl != null) {
+            labels += getString(R.string.open_webpage)
+            actions += { openResolvedLink(webView, pageUrl, background = null) }
+            labels += getString(R.string.open_in_new_tab)
+            actions += { openResolvedLink(webView, pageUrl, background = false) }
+            labels += getString(R.string.open_in_background_tab)
+            actions += { openResolvedLink(webView, pageUrl, background = true) }
+        }
+        if (target.offersImage && imageUrl != null) {
+            labels += getString(R.string.open_image)
+            actions += { openResolvedLink(webView, imageUrl, background = null) }
+        }
+        if (labels.isEmpty()) return
+        // The long-press callback arrives before the finger lifts. An outside
+        // lift would cancel a normal dialog, so keep it up until an item or Back.
+        webView.post {
+            if (!isAdded) return@post
+            val dialog = MaterialAlertDialogBuilder(requireContext())
+                .setTitle(pageUrl ?: imageUrl)
+                .setItems(labels.toTypedArray()) { _, which ->
+                    com.myAllVideoBrowser.util.AppLogger.d(
+                        "LONG_PRESS_CHOICE which=$which label=${labels[which]}"
+                    )
+                    // Item click dismisses the dialog in the same turn. Loading
+                    // before that dismiss finishes gets cancelled and the old
+                    // document stays on screen.
+                    val action = actions[which]
+                    webView.postDelayed({ action.invoke() }, 250)
+                }
+                .create()
+            dialog.setCanceledOnTouchOutside(false)
+            dialog.show()
+        }
+    }
+
     private fun openLinkFromPage(url: String, background: Boolean) {
         val source = webTab.getWebView()?.url ?: webTab.getUrl()
         val verdict = com.myAllVideoBrowser.ui.main.home.browser.tabs.PopupGate.decide(
@@ -768,6 +851,37 @@ class WebTabFragment : BaseWebTabFragment() {
         if (background) {
             Toast.makeText(requireContext(), R.string.opened_in_background, Toast.LENGTH_SHORT).show()
         }
+    }
+
+    /**
+     * @param background null loads the address in the current tab. True and false
+     * open a background or foreground tab. Page actions pass the anchor href;
+     * only the explicit image action passes the thumbnail.
+     */
+    private fun openResolvedLink(webView: WebView, url: String, background: Boolean?) {
+        val source = webView.url ?: webTab.getUrl()
+        val verdict = com.myAllVideoBrowser.ui.main.home.browser.tabs.PopupGate.decide(
+            request = com.myAllVideoBrowser.ui.main.home.browser.tabs.PopupRequest(
+                url = url,
+                isUserGesture = true,
+                sourceUrl = source
+            ),
+            adBlockEnabled = mainActivity.settingsViewModel.isAdBlockOn.get() == true,
+            isChallenge = { CustomWebViewClient.isBotChallengeOrCaptcha(it) },
+            isAd = { candidate, page -> adBlockEngine.isAd(candidate, page, "main_frame") }
+        )
+        com.myAllVideoBrowser.util.AppLogger.d(
+            "LONG_PRESS_OPEN url=$url background=$background verdict=$verdict attached=${webView.isAttachedToWindow} before=${webView.url}"
+        )
+        if (verdict != com.myAllVideoBrowser.ui.main.home.browser.tabs.PopupVerdict.OPEN_FOREGROUND) {
+            Toast.makeText(requireContext(), R.string.popup_blocked, Toast.LENGTH_SHORT).show()
+            return
+        }
+        if (background == null) {
+            webView.post { webView.loadUrl(url) }
+            return
+        }
+        openLinkFromPage(url, background)
     }
 
     private fun setUserAgentIsDesktop(isDesktop: Boolean) {

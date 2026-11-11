@@ -139,8 +139,8 @@ android {
         applicationId = if (trialBuild) "com.myAllVideoBrowser.trial" else "com.myAllVideoBrowser"
         minSdk = libs.versions.minSdk.get().toInt()
         targetSdk = libs.versions.targetSdk.get().toInt()
-        versionCode = if (trialBuild) 510 else 509
-        versionName = if (trialBuild) "0.9.1.4-tabs-trial" else "0.9.1.4"
+        versionCode = if (trialBuild) 511 else 509
+        versionName = if (trialBuild) "0.9.1.5-tabs-trial" else "0.9.1.4"
         manifestPlaceholders["appLabel"] = if (trialBuild) "SVD Tabs Trial" else "@string/app_name"
         buildConfigField("boolean", "TRIAL_BUILD", trialBuild.toString())
 

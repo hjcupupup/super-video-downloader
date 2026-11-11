@@ -455,23 +455,12 @@ class BrowserFragment : BaseFragment(), BrowserServicesProvider {
         browserViewModel.bottomForwardEvent.observe(viewLifecycleOwner) {
             handleBrowserForward()
         }
-        browserViewModel.showTabsEvent.observe(viewLifecycleOwner) {
-            showTabsSheet()
-        }
         browserViewModel.newTabEvent.observe(viewLifecycleOwner) {
             if (dataBinding.drawerLayout.isDrawerOpen(GravityCompat.START)) {
                 dataBinding.drawerLayout.close()
             }
             openBlankTab()
         }
-        dataBinding.browserTabsButton.text = browserViewModel.tabCount.get().toString()
-        browserViewModel.tabCount.addOnPropertyChangedCallback(object :
-            Observable.OnPropertyChangedCallback() {
-            override fun onPropertyChanged(sender: Observable?, propertyId: Int) {
-                if (!isAdded) return
-                dataBinding.browserTabsButton.text = browserViewModel.tabCount.get().toString()
-            }
-        })
     }
 
     fun openBlankTab() {
