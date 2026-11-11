@@ -78,6 +78,15 @@ open class VideoDetectionTabViewModel @Inject constructor(
     lateinit var settingsModel: SettingsViewModel
     val detectedVideosList = ObservableField<MutableSet<VideoInfo>>(ConcurrentHashMap.newKeySet())
 
+    /** Fired only when a video is newly stored on this tab. */
+    var onVideoAccepted: ((VideoInfo) -> Unit)? = null
+
+    private var started = false
+
+    protected fun markSessionStarted() {
+        started = true
+    }
+
     val filterRegex =
         Regex("^(.*\\.(apk|html|xml|ico|css|js|png|gif|json|jpg|jpeg|svg|woff|woff2|m3u8|mpd|ts|php|ttf|otf|eot|cur|webp|bmp|tif|tiff|psd|ai|eps|pdf|doc|docx|xls|xlsx|ppt|pptx|csv|md|rtf|vtt|srt|swf|jar|log|txt|m4s))?$")
     val downloadButtonIcon = ObservableInt(R.drawable.invisible_24px)
@@ -130,6 +139,8 @@ open class VideoDetectionTabViewModel @Inject constructor(
     }
 
     override fun start() {
+        if (started) return
+        started = true
         AppLogger.d("START")
         regularLoadingList.addOnPropertyChangedCallback(regularLoadingListCallback)
         m3u8LoadingList.addOnPropertyChangedCallback(m3u8LoadingListCallback)
@@ -139,6 +150,8 @@ open class VideoDetectionTabViewModel @Inject constructor(
     }
 
     override fun stop() {
+        if (!started) return
+        started = false
         AppLogger.d("STOP")
         regularLoadingList.removeOnPropertyChangedCallback(regularLoadingListCallback)
         m3u8LoadingList.removeOnPropertyChangedCallback(m3u8LoadingListCallback)
@@ -343,6 +356,7 @@ open class VideoDetectionTabViewModel @Inject constructor(
 
             detectedVideosList.set(nextSet)
             setButtonState(DownloadButtonStateCanDownload(newInfo))
+            onVideoAccepted?.invoke(newInfo)
 
             viewModelScope.launch(Dispatchers.Main) {
                 videoPushedEvent.call()

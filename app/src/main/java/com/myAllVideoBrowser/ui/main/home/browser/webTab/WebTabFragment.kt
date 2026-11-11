@@ -6,6 +6,7 @@ import android.net.Uri
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.Message
 import android.text.Editable
 import android.text.TextWatcher
 import android.view.LayoutInflater
@@ -50,6 +51,7 @@ import com.myAllVideoBrowser.ui.main.home.browser.DownloadButtonStateCanDownload
 import com.myAllVideoBrowser.ui.main.home.browser.DownloadButtonStateCanNotDownload
 import com.myAllVideoBrowser.ui.main.home.browser.DownloadButtonStateLoading
 import com.myAllVideoBrowser.ui.main.home.browser.HOME_TAB_INDEX
+import com.myAllVideoBrowser.ui.main.home.browser.tabs.LongPressLinkResolver
 import com.myAllVideoBrowser.ui.main.home.browser.HistoryProvider
 import com.myAllVideoBrowser.ui.main.home.browser.PageTabProvider
 import com.myAllVideoBrowser.ui.main.home.browser.TAB_INDEX_KEY
@@ -113,13 +115,7 @@ class WebTabFragment : BaseWebTabFragment() {
 
     private var videoToast: Toast? = null
 
-    private var canGoCounter = 0
-
-    private val backPressedCallback = object : OnBackPressedCallback(true) {
-        override fun handleOnBackPressed() {
-            handleOnBackPress()
-        }
-    }
+    private var lastWorkerEventId = -1L
 
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreateView(
@@ -133,18 +129,32 @@ class WebTabFragment : BaseWebTabFragment() {
         workerEventProvider = mainActivity.mainViewModel.browserServicesProvider!!
         currentTabIndexProvider = mainActivity.mainViewModel.browserServicesProvider!!
 
-        tabViewModel = ViewModelProvider(this, viewModelFactory)[WebTabViewModel::class]
+        webTab = pageTabProvider.getPageTab(thisTabIndex)
+        val browserViewModel = ViewModelProvider(
+            requireParentFragment(),
+            viewModelFactory
+        )[com.myAllVideoBrowser.ui.main.home.browser.BrowserViewModel::class.java]
+        val tabStore = browserViewModel.tabStores.store(webTab.id)
+        tabViewModel = ViewModelProvider(tabStore, viewModelFactory)[WebTabViewModel::class]
         videoDetectionTabViewModel =
-            ViewModelProvider(this, viewModelFactory)[VideoDetectionTabViewModel::class]
+            ViewModelProvider(tabStore, viewModelFactory)[VideoDetectionTabViewModel::class]
+        browserViewModel.tabStores.rememberDetection(webTab.id, videoDetectionTabViewModel)
         videoDetectionTabViewModel.settingsModel = mainActivity.settingsViewModel
         videoDetectionTabViewModel.webTabModel = tabViewModel
+        videoDetectionTabViewModel.onVideoAccepted = { info ->
+            browserViewModel.onDetected(webTab.id, info.id)
+        }
+        if (videoDetectionTabViewModel.initialUrl.isEmpty()) {
+            videoDetectionTabViewModel.initialUrl = webTab.getUrl()
+        }
 
         tabViewModel.openPageEvent = tabManagerProvider.getOpenTabEvent()
         tabViewModel.closePageEvent = tabManagerProvider.getCloseTabEvent()
         tabViewModel.thisTabIndex.set(thisTabIndex)
-
-        webTab = pageTabProvider.getPageTab(thisTabIndex)
-        videoDetectionTabViewModel.initialUrl = webTab.getUrl()
+        tabViewModel.tabId = webTab.id
+        tabViewModel.sessionSink = browserViewModel
+        tabViewModel.start()
+        videoDetectionTabViewModel.start()
 
         AppLogger.d("onCreate Webview::::::::: ${webTab.getUrl()} $savedInstanceState")
         suggestionAdapter =
@@ -186,12 +196,6 @@ class WebTabFragment : BaseWebTabFragment() {
             configureWebView(this)
         }
 
-        requireActivity().onBackPressedDispatcher.addCallback(
-            viewLifecycleOwner, backPressedCallback
-        )
-
-        addChangeRouteCallBack()
-
         tabViewModel.userAgent.set(
             webTab.getWebView()?.settings?.userAgentString
                 ?: BrowserFragment.MOBILE_USER_AGENT
@@ -201,8 +205,23 @@ class WebTabFragment : BaseWebTabFragment() {
         if (message != null) {
             message.sendToTarget()
             webTab.flushMessage()
+        } else if (!webTab.restoredFromState && !webTab.deferLoadStarted) {
+            val currentUrl = webTab.getWebView()?.url
+            val target = webTab.getUrl()
+            if ((currentUrl.isNullOrBlank() || currentUrl == "about:blank") && target.startsWith("http")) {
+                tabViewModel.loadPage(target)
+            }
+        }
+        webTab.restoredFromState = false
+        if (webTab.pendingAddressFocus) {
+            webTab.pendingAddressFocus = false
+            tabViewModel.changeTabFocus(true)
+        }
+        val currentId = browserViewModel.currentWebTab()?.id
+        if (webTab.id == currentId) {
+            webTab.getWebView()?.onResume()
         } else {
-            tabViewModel.loadPage(webTab.getUrl())
+            webTab.getWebView()?.onPause()
         }
 
         return dataBinding.root
@@ -268,28 +287,27 @@ class WebTabFragment : BaseWebTabFragment() {
         AppLogger.d("onPause Webview::::::::: ${webTab.getUrl()}")
         super.onPause()
         onWebViewPause()
-        backPressedCallback.remove()
     }
 
     override fun onResume() {
         AppLogger.d("onResume Webview::::::::: ${webTab.getUrl()}")
         super.onResume()
         onWebViewResume()
-
-        activity?.onBackPressedDispatcher?.addCallback(
-            viewLifecycleOwner, backPressedCallback
-        )
     }
 
     override fun onDestroy() {
         AppLogger.d("onDestroy Webview::::::::: ${webTab.getUrl()}")
-        super.onDestroy()
-        webTab.getWebView()?.let { destroyWebView(it) }
-        tabViewModel.stop()
-        webTab.setWebView(null)
-        videoDetectionTabViewModel.stop()
+        retainOrReleaseWebView()
         tabManagerProvider.getTabsListChangeEvent()
             .removeOnPropertyChangedCallback(tabsListChangeListener)
+        super.onDestroy()
+    }
+
+    fun hideCustomViewIfShowing(): Boolean {
+        if (!::dataBinding.isInitialized) return false
+        if (dataBinding.customView.visibility != View.VISIBLE) return false
+        webTab.getWebView()?.webChromeClient?.onHideCustomView()
+        return true
     }
 
     private fun handleOpenDetectedVideos() {
@@ -377,15 +395,25 @@ class WebTabFragment : BaseWebTabFragment() {
         }
     }
 
+    private var boundWebViewGeneration = 0
+
     private fun recreateWebView(savedInstanceState: Bundle?) {
         try {
-            if (webTab.getMessage() == null || webTab.getWebView() == null) {
+            if (webTab.getWebView() == null) {
                 webTab.setWebView(NestedWebView(requireContext()))
+                val state = webTab.savedState ?: savedInstanceState
+                if (state != null && !state.isEmpty) {
+                    webTab.getWebView()?.restoreState(state)
+                    webTab.savedState = null
+                    webTab.restoredFromState = true
+                }
+            } else {
+                (webTab.getWebView()?.parent as? ViewGroup)?.removeView(webTab.getWebView())
             }
-
-            if (savedInstanceState != null) {
-                webTab.getWebView()?.restoreState(savedInstanceState)
-            }
+            boundWebViewGeneration = ++webTab.webViewGeneration
+            ViewModelProvider(requireParentFragment(), viewModelFactory)
+                .get(com.myAllVideoBrowser.ui.main.home.browser.BrowserViewModel::class.java)
+                .markWebViewLive(webTab.id, true)
         } catch (e: Exception) {
             AppLogger.e("Failed to recreate WebView: ${e.message}")
             context?.let {
@@ -429,7 +457,8 @@ class WebTabFragment : BaseWebTabFragment() {
             pageTabProvider,
             fragmentWebTabBinding,
             appUtil,
-            mainActivity
+            mainActivity,
+            adBlockEngine
         )
 
         currentWebView.webChromeClient = chromeClient
@@ -462,20 +491,10 @@ class WebTabFragment : BaseWebTabFragment() {
                 userAgentString = BrowserFragment.DESKTOP_USER_AGENT
             }
         }
-        currentWebView.setOnCreateContextMenuListener { menu, v, _ ->
-            val webView = v as WebView
-            val hitTestResult = webView.hitTestResult
-
-            if (hitTestResult.type == WebView.HitTestResult.SRC_ANCHOR_TYPE) {
-                val url = hitTestResult.extra
-                if (url != null) {
-                    menu.setHeaderTitle(url)
-                    menu.add(0, 1, 0, "Open in new tab").setOnMenuItemClickListener {
-                        tabViewModel.openPageEvent.value = WebTab(url, url)
-                        true
-                    }
-                }
-            }
+        currentWebView.isLongClickable = true
+        currentWebView.setOnLongClickListener { view ->
+            val webView = view as WebView
+            resolveLongPress(webView)
         }
 
         currentWebView.addJavascriptInterface(
@@ -545,7 +564,18 @@ class WebTabFragment : BaseWebTabFragment() {
     }
 
     private fun handleWorkerEvent() {
-        workerEventProvider.getWorkerM3u8MpdEvent().observe(viewLifecycleOwner) { state ->
+        workerEventProvider.getWorkerM3u8MpdEvent().observe(viewLifecycleOwner) { event ->
+            if (!com.myAllVideoBrowser.ui.main.home.browser.tabs.DetectionRouter.shouldApply(
+                    event.ownerTabId,
+                    webTab.id,
+                    event.eventId,
+                    lastWorkerEventId
+                )
+            ) {
+                return@observe
+            }
+            lastWorkerEventId = event.eventId
+            val state = event.state
             if (state is DownloadButtonStateCanDownload && state.info?.id?.isNotEmpty() == true) {
                 lifecycleScope.launch(Dispatchers.IO) {
                     videoDetectionTabViewModel.pushNewVideoInfoToAll(state.info)
@@ -597,7 +627,9 @@ class WebTabFragment : BaseWebTabFragment() {
     }
 
     private fun onWebViewPause() {
-        webTab.getWebView()?.onPause()
+        val webView = webTab.getWebView() ?: return
+        webView.onPause()
+        webView.evaluateJavascript(BrowserFragment.PAUSE_MEDIA_JS, null)
     }
 
     private fun onWebViewResume() {
@@ -650,32 +682,11 @@ class WebTabFragment : BaseWebTabFragment() {
         }
 
         override fun onBrowserBackClicked() {
-            val webView = webTab.getWebView()
-            val canGoBack = webView?.canGoBack()
-            if (canGoBack == true) {
-                webView.goBack()
-                tabViewModel.onGoBack(webView)
-                videoDetectionTabViewModel.cancelAllCheckJobs()
-            }
-
-            if (canGoBack == false) {
-                if (canGoCounter >= 1) {
-                    canGoCounter = 0
-                    mainActivity.mainViewModel.openNavDrawerEvent.call()
-                } else {
-                    canGoCounter++
-                }
-            }
+            (parentFragment as? BrowserFragment)?.handleBrowserBack(fromSystem = false)
         }
 
         override fun onBrowserForwardClicked() {
-            val webView = webTab.getWebView()
-            val canGoForward = webView?.canGoForward()
-            if (canGoForward == true) {
-                webView.goForward()
-                tabViewModel.onGoForward(webView)
-                videoDetectionTabViewModel.cancelAllCheckJobs()
-            }
+            (parentFragment as? BrowserFragment)?.handleBrowserForward()
         }
         
         override fun onShowLogsClicked() {
@@ -721,17 +732,156 @@ class WebTabFragment : BaseWebTabFragment() {
         }
     }
 
-    private fun handleOnBackPress() {
-        val isBrowserRoute = mainActivity.mainViewModel.currentItem.get() == 0
-        val isCurrentTabSelected =
-            currentTabIndexProvider.getCurrentTabIndex().get() == requireArguments().getInt(
-                TAB_INDEX_KEY
-            )
-        val isStateResumed = viewLifecycleOwner.lifecycle.currentState == Lifecycle.State.RESUMED
-
-        if (isStateResumed && isBrowserRoute && isCurrentTabSelected && isVisible) {
-            webTab.getWebView()?.goBack()
+    /**
+     * Hit-test extra for an image inside a link is the bitmap address. The page
+     * address arrives asynchronously from the focused anchor.
+     */
+    private fun resolveLongPress(webView: WebView): Boolean {
+        val hit = webView.hitTestResult
+        val type = hit.type
+        if (type == WebView.HitTestResult.UNKNOWN_TYPE ||
+            type == WebView.HitTestResult.EDIT_TEXT_TYPE
+        ) {
+            return false
         }
+        val extra = hit.extra
+        var focusHref: String? = null
+        var focusSrc: String? = null
+        var imageRef: String? = null
+        var gotHref = false
+        var shown = false
+        fun publish() {
+            if (shown || !gotHref || !isAdded) return
+            shown = true
+            val target = LongPressLinkResolver.resolve(type, extra, focusHref, focusSrc, imageRef)
+            com.myAllVideoBrowser.util.AppLogger.d(
+                "LONG_PRESS type=$type extra=$extra href=$focusHref src=$focusSrc imageRef=$imageRef page=${target.pageUrl} image=${target.imageUrl}"
+            )
+            if (!target.offersPage && !target.offersImage) return
+            showLongPressMenu(webView, target)
+        }
+        val handler = object : Handler(Looper.getMainLooper()) {
+            override fun handleMessage(msg: Message) {
+                when (msg.what) {
+                    1 -> {
+                        focusHref = msg.data?.getString("url")
+                        focusSrc = msg.data?.getString("src")
+                        gotHref = true
+                        val waitingForBareImage = type == WebView.HitTestResult.IMAGE_TYPE &&
+                            focusSrc.isNullOrBlank() && imageRef.isNullOrBlank()
+                        if (!waitingForBareImage) publish()
+                    }
+                    2 -> {
+                        imageRef = msg.data?.getString("url")
+                        if (gotHref) publish()
+                    }
+                }
+            }
+        }
+        webView.requestFocusNodeHref(handler.obtainMessage(1))
+        webView.requestImageRef(handler.obtainMessage(2))
+        handler.postDelayed({
+            if (!gotHref) {
+                gotHref = true
+                publish()
+            }
+        }, 700)
+        return true
+    }
+
+    private fun showLongPressMenu(webView: WebView, target: LongPressLinkResolver.Target) {
+        val pageUrl = target.pageUrl
+        val imageUrl = target.imageUrl
+        val labels = mutableListOf<String>()
+        val actions = mutableListOf<() -> Unit>()
+        if (target.offersPage && pageUrl != null) {
+            labels += getString(R.string.open_webpage)
+            actions += { openResolvedLink(webView, pageUrl, background = null) }
+            labels += getString(R.string.open_in_new_tab)
+            actions += { openResolvedLink(webView, pageUrl, background = false) }
+            labels += getString(R.string.open_in_background_tab)
+            actions += { openResolvedLink(webView, pageUrl, background = true) }
+        }
+        if (target.offersImage && imageUrl != null) {
+            labels += getString(R.string.open_image)
+            actions += { openResolvedLink(webView, imageUrl, background = null) }
+        }
+        if (labels.isEmpty()) return
+        // The long-press callback arrives before the finger lifts. An outside
+        // lift would cancel a normal dialog, so keep it up until an item or Back.
+        webView.post {
+            if (!isAdded) return@post
+            val dialog = MaterialAlertDialogBuilder(requireContext())
+                .setTitle(pageUrl ?: imageUrl)
+                .setItems(labels.toTypedArray()) { _, which ->
+                    com.myAllVideoBrowser.util.AppLogger.d(
+                        "LONG_PRESS_CHOICE which=$which label=${labels[which]}"
+                    )
+                    // Item click dismisses the dialog in the same turn. Loading
+                    // before that dismiss finishes gets cancelled and the old
+                    // document stays on screen.
+                    val action = actions[which]
+                    webView.postDelayed({ action.invoke() }, 250)
+                }
+                .create()
+            dialog.setCanceledOnTouchOutside(false)
+            dialog.show()
+        }
+    }
+
+    private fun openLinkFromPage(url: String, background: Boolean) {
+        val source = webTab.getWebView()?.url ?: webTab.getUrl()
+        val verdict = com.myAllVideoBrowser.ui.main.home.browser.tabs.PopupGate.decide(
+            request = com.myAllVideoBrowser.ui.main.home.browser.tabs.PopupRequest(
+                url = url,
+                isUserGesture = true,
+                sourceUrl = source
+            ),
+            adBlockEnabled = mainActivity.settingsViewModel.isAdBlockOn.get() == true,
+            isChallenge = { CustomWebViewClient.isBotChallengeOrCaptcha(it) },
+            isAd = { candidate, page -> adBlockEngine.isAd(candidate, page, "main_frame") }
+        )
+        if (verdict != com.myAllVideoBrowser.ui.main.home.browser.tabs.PopupVerdict.OPEN_FOREGROUND) {
+            Toast.makeText(requireContext(), R.string.popup_blocked, Toast.LENGTH_SHORT).show()
+            return
+        }
+        val tab = WebTab(url, url)
+        tab.openInBackground = background
+        tabViewModel.openPageEvent.value = tab
+        if (background) {
+            Toast.makeText(requireContext(), R.string.opened_in_background, Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    /**
+     * @param background null loads the address in the current tab. True and false
+     * open a background or foreground tab. Page actions pass the anchor href;
+     * only the explicit image action passes the thumbnail.
+     */
+    private fun openResolvedLink(webView: WebView, url: String, background: Boolean?) {
+        val source = webView.url ?: webTab.getUrl()
+        val verdict = com.myAllVideoBrowser.ui.main.home.browser.tabs.PopupGate.decide(
+            request = com.myAllVideoBrowser.ui.main.home.browser.tabs.PopupRequest(
+                url = url,
+                isUserGesture = true,
+                sourceUrl = source
+            ),
+            adBlockEnabled = mainActivity.settingsViewModel.isAdBlockOn.get() == true,
+            isChallenge = { CustomWebViewClient.isBotChallengeOrCaptcha(it) },
+            isAd = { candidate, page -> adBlockEngine.isAd(candidate, page, "main_frame") }
+        )
+        com.myAllVideoBrowser.util.AppLogger.d(
+            "LONG_PRESS_OPEN url=$url background=$background verdict=$verdict attached=${webView.isAttachedToWindow} before=${webView.url}"
+        )
+        if (verdict != com.myAllVideoBrowser.ui.main.home.browser.tabs.PopupVerdict.OPEN_FOREGROUND) {
+            Toast.makeText(requireContext(), R.string.popup_blocked, Toast.LENGTH_SHORT).show()
+            return
+        }
+        if (background == null) {
+            webView.post { webView.loadUrl(url) }
+            return
+        }
+        openLinkFromPage(url, background)
     }
 
     private fun setUserAgentIsDesktop(isDesktop: Boolean) {
@@ -740,30 +890,6 @@ class WebTabFragment : BaseWebTabFragment() {
             settings?.userAgentString = BrowserFragment.DESKTOP_USER_AGENT
         } else {
             settings?.userAgentString = null
-        }
-    }
-
-    private fun addChangeRouteCallBack() {
-        mainActivity.mainViewModel.currentItem.removeOnPropertyChangedCallback(changeRouteCallBack)
-        mainActivity.mainViewModel.currentItem.addOnPropertyChangedCallback(changeRouteCallBack)
-    }
-
-    private val changeRouteCallBack = object : Observable.OnPropertyChangedCallback() {
-        override fun onPropertyChanged(sender: Observable?, propertyId: Int) {
-            val indexRoute = mainActivity.mainViewModel.currentItem.get()
-            val currentTabIndexSelected = currentTabIndexProvider.getCurrentTabIndex().get()
-            val isCurrentTabSelected =
-                currentTabIndexSelected == requireArguments().getInt(TAB_INDEX_KEY)
-            val isBrowserRoute = indexRoute == 0
-            val isNotHomeTabSelected = currentTabIndexSelected != HOME_TAB_INDEX
-            val isVisible = this@WebTabFragment.isVisible
-            if (isBrowserRoute && isNotHomeTabSelected && isCurrentTabSelected && isVisible) {
-                activity?.onBackPressedDispatcher?.addCallback(
-                    viewLifecycleOwner, backPressedCallback
-                )
-            } else {
-                backPressedCallback.remove()
-            }
         }
     }
 
@@ -781,11 +907,37 @@ class WebTabFragment : BaseWebTabFragment() {
         }
     }
 
-    private fun destroyWebView(webView: WebView) {
-        val webViewContainer: ViewGroup? = webView.parent as? ViewGroup
-        webViewContainer?.removeView(webView)
-        webView.destroy()
+    private fun retainOrReleaseWebView() {
+        val webView = webTab.getWebView() ?: return
+        if (boundWebViewGeneration != webTab.webViewGeneration) return
+        val browserViewModel = runCatching {
+            ViewModelProvider(requireParentFragment(), viewModelFactory)
+                .get(com.myAllVideoBrowser.ui.main.home.browser.BrowserViewModel::class.java)
+        }.getOrNull()
+        val tabStillOpen = browserViewModel?.findTab(webTab.id) != null
+        val finishing = activity?.isFinishing == true
+        val changingConfig = activity?.isChangingConfigurations == true
+        (webView.parent as? ViewGroup)?.removeView(webView)
+        webView.onPause()
+        val release = finishing || !tabStillOpen || changingConfig ||
+            browserViewModel?.dispositionOnDetach(webTab.id) ==
+            com.myAllVideoBrowser.ui.main.home.browser.tabs.WebViewDisposition.RELEASE
+        if (!release && tabStillOpen) {
+            browserViewModel?.markWebViewLive(webTab.id, true)
+            return
+        }
+        if (tabStillOpen && !finishing) {
+            val state = Bundle()
+            webView.saveState(state)
+            webTab.savedState = state
+        }
+        webTab.webViewGeneration++
         webTab.setWebView(null)
+        browserViewModel?.markWebViewLive(webTab.id, false)
+        try {
+            webView.destroy()
+        } catch (_: Throwable) {
+        }
     }
 
     private fun navigateToDownloads() {

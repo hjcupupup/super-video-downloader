@@ -47,12 +47,24 @@
                 <androidx.recyclerview.widget.RecyclerView
                     android:id="@+id/tabs_list"
                     android:layout_width="match_parent"
-                    android:layout_height="match_parent"
+                    android:layout_height="0dp"
+                    android:layout_weight="1"
                     android:clipToPadding="false"
-                    android:paddingBottom="16dp"
+                    android:paddingBottom="8dp"
                     android:contentDescription="@string/tabs"
                     app:items="@{viewModel.tabs}"
                     app:selectedTab="@{viewModel.currentTab}" />
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/drawer_new_tab"
+                    style="@style/Widget.Material3.Button.TonalButton"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_margin="16dp"
+                    android:contentDescription="@string/accessibility_new_tab"
+                    android:onClick="@{() -> viewModel.onNewTabClicked()}"
+                    android:text="@string/new_tab"
+                    app:icon="@drawable/add_24px" />
 
             </LinearLayout>
         </com.google.android.material.navigation.NavigationView>

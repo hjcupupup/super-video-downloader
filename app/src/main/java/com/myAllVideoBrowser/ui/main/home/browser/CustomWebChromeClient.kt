@@ -2,23 +2,32 @@ package com.myAllVideoBrowser.ui.main.home.browser
 
 import android.content.pm.ActivityInfo
 import android.graphics.Bitmap
+import android.os.Handler
+import android.os.Looper
 import android.os.Message
 import android.view.View
 import android.view.WindowManager
 import android.webkit.PermissionRequest
 import android.webkit.WebChromeClient
+import android.webkit.WebResourceRequest
 import android.webkit.WebView
+import android.webkit.WebViewClient
 import android.widget.Toast
 import com.myAllVideoBrowser.R
 import com.myAllVideoBrowser.databinding.FragmentWebTabBinding
 import com.myAllVideoBrowser.ui.component.widget.NestedWebView
 import com.myAllVideoBrowser.ui.main.home.MainActivity
+import com.myAllVideoBrowser.ui.main.home.browser.adblocker.AdBlockEngine
+import com.myAllVideoBrowser.ui.main.home.browser.tabs.PopupGate
+import com.myAllVideoBrowser.ui.main.home.browser.tabs.PopupRequest
+import com.myAllVideoBrowser.ui.main.home.browser.tabs.PopupVerdict
 import com.myAllVideoBrowser.ui.main.home.browser.webTab.WebTab
 import com.myAllVideoBrowser.ui.main.home.browser.webTab.WebTabViewModel
 import com.myAllVideoBrowser.ui.main.settings.SettingsViewModel
 import com.myAllVideoBrowser.util.AppLogger
 import com.myAllVideoBrowser.util.AppUtil
 import com.myAllVideoBrowser.util.SingleLiveEvent
+import java.util.concurrent.atomic.AtomicBoolean
 
 class CustomWebChromeClient(
     private val tabViewModel: WebTabViewModel,
@@ -27,8 +36,10 @@ class CustomWebChromeClient(
     private val pageTabProvider: PageTabProvider,
     private val dataBinding: FragmentWebTabBinding,
     private val appUtil: AppUtil,
-    private val mainActivity: MainActivity
+    private val mainActivity: MainActivity,
+    private val adBlockEngine: AdBlockEngine
 ) : WebChromeClient() {
+    private val mainHandler = Handler(Looper.getMainLooper())
 
     override fun onPermissionRequest(request: PermissionRequest?) {
         val resources = request?.resources
@@ -47,43 +58,139 @@ class CustomWebChromeClient(
         isUserGesture: Boolean,
         resultMsg: Message?
     ): Boolean {
-        if (!isUserGesture || view == null || resultMsg == null) {
+        if (view == null || resultMsg == null) {
             return false
         }
         val hitTestResult = view.hitTestResult
-        val url = hitTestResult.extra
-
-        // Check if the click was on a valid link URL.
-        if (hitTestResult.type != WebView.HitTestResult.SRC_ANCHOR_TYPE || url.isNullOrBlank()) {
+        val anchorUrl = if (hitTestResult.type == WebView.HitTestResult.SRC_ANCHOR_TYPE) {
+            hitTestResult.extra
+        } else {
+            null
+        }
+        val verdict = decidePopup(anchorUrl, isUserGesture, view.url)
+        AppLogger.d("ON_CREATE_WINDOW verdict=$verdict url=$anchorUrl gesture=$isUserGesture dialog=$isDialog")
+        if (verdict == PopupVerdict.BLOCK) {
             return false
         }
-        AppLogger.d("ON_CREATE_WINDOW: URL from HitTestResult: $url")
 
-        if (!url.startsWith("http")) {
-            AppLogger.d("ON_CREATE_WINDOW: Blocking ad or non-http scheme: $url")
-            return false // Blocked
-        }
-
-        try {
+        return try {
             val transport = resultMsg.obj as WebView.WebViewTransport
             val newWebView = NestedWebView(view.context)
+            if (verdict == PopupVerdict.DEFER_UNTIL_URL) {
+                armProvisionalPopup(view, newWebView)
+            }
             transport.webView = newWebView
-
-            tabViewModel.openPageEvent.value =
-                WebTab(
+            if (verdict == PopupVerdict.OPEN_FOREGROUND) {
+                tabViewModel.openPageEvent.value = WebTab(
                     webview = newWebView,
                     resultMsg = resultMsg,
-                    url = url,
+                    url = anchorUrl ?: "",
                     title = "Loading...",
                     icon = null
                 )
-
-            return true
+            } else {
+                // The URL is not known yet. Deliver it to the provisional client
+                // and only then create a tab, so an ad cannot skip the gate.
+                resultMsg.sendToTarget()
+            }
+            true
         } catch (e: Exception) {
             AppLogger.e("Failed to create new WebView window: ${e.message}")
             Toast.makeText(view.context, "WebView provider not available.", Toast.LENGTH_SHORT)
                 .show()
+            false
+        }
+    }
+
+    private fun decidePopup(url: String?, isUserGesture: Boolean, sourceUrl: String?): PopupVerdict {
+        return PopupGate.decide(
+            request = PopupRequest(url, isUserGesture, sourceUrl),
+            adBlockEnabled = settingsViewModel.isAdBlockOn.get() == true,
+            isChallenge = { CustomWebViewClient.isBotChallengeOrCaptcha(it) },
+            isAd = { candidate, source ->
+                adBlockEngine.isAd(candidate, source, "main_frame")
+            }
+        )
+    }
+
+    private fun armProvisionalPopup(opener: WebView, popup: WebView) {
+        val committed = AtomicBoolean(false)
+        val abandoned = AtomicBoolean(false)
+        val sourceUrl = opener.url
+        popup.settings.javaScriptEnabled = true
+        popup.settings.domStorageEnabled = true
+        popup.settings.setSupportMultipleWindows(false)
+        popup.settings.javaScriptCanOpenWindowsAutomatically = false
+        popup.webViewClient = object : WebViewClient() {
+            override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
+                if (!request.isForMainFrame) return false
+                val url = request.url?.toString().orEmpty()
+                return !acceptProvisionalUrl(sourceUrl, popup, url, committed, abandoned)
+            }
+
+            override fun shouldInterceptRequest(
+                view: WebView,
+                request: WebResourceRequest
+            ): android.webkit.WebResourceResponse? {
+                val url = request.url?.toString().orEmpty()
+                if (url.isBlank() || CustomWebViewClient.isBotChallengeOrCaptcha(url)) {
+                    return super.shouldInterceptRequest(view, request)
+                }
+                val resourceType = if (request.isForMainFrame) "main_frame" else "other"
+                val blocked = settingsViewModel.isAdBlockOn.get() == true &&
+                    adBlockEngine.isAd(url, sourceUrl ?: "", resourceType)
+                if (!blocked) {
+                    if (request.isForMainFrame) {
+                        acceptProvisionalUrl(sourceUrl, popup, url, committed, abandoned)
+                    }
+                    return super.shouldInterceptRequest(view, request)
+                }
+                if (request.isForMainFrame && !committed.get()) {
+                    abandonProvisional(popup, abandoned, committed)
+                }
+                return CustomWebViewClient.emptyResponse()
+            }
+        }
+    }
+
+    private fun acceptProvisionalUrl(
+        sourceUrl: String?,
+        popup: WebView,
+        url: String,
+        committed: AtomicBoolean,
+        abandoned: AtomicBoolean
+    ): Boolean {
+        if (abandoned.get()) return false
+        val verdict = decidePopup(url, isUserGesture = true, sourceUrl = sourceUrl)
+        if (verdict != PopupVerdict.OPEN_FOREGROUND) {
+            if (!committed.get()) {
+                abandonProvisional(popup, abandoned, committed)
+            }
             return false
+        }
+        if (!committed.compareAndSet(false, true)) return true
+        mainHandler.post {
+            if (abandoned.get()) return@post
+            val tab = WebTab(url, url, webview = popup, resultMsg = null)
+            tab.deferLoadStarted = true
+            tabViewModel.openPageEvent.value = tab
+        }
+        return true
+    }
+
+    private fun abandonProvisional(
+        popup: WebView,
+        abandoned: AtomicBoolean,
+        committed: AtomicBoolean
+    ) {
+        if (committed.get()) return
+        if (!abandoned.compareAndSet(false, true)) return
+        mainHandler.post {
+            try {
+                popup.stopLoading()
+                popup.destroy()
+            } catch (_: Throwable) {
+            }
         }
     }
 

@@ -10,6 +10,7 @@ import com.myAllVideoBrowser.R
 import com.myAllVideoBrowser.data.local.room.entity.HistoryItem
 import com.myAllVideoBrowser.data.repository.HistoryRepository
 import com.myAllVideoBrowser.ui.main.base.BaseViewModel
+import com.myAllVideoBrowser.ui.main.home.browser.tabs.TabSessionSink
 import com.myAllVideoBrowser.util.SingleLiveEvent
 import com.myAllVideoBrowser.util.scheduler.BaseSchedulers
 import io.reactivex.rxjava3.core.BackpressureStrategy
@@ -47,6 +48,12 @@ class WebTabViewModel @Inject constructor(
 
     val loadPageEvent = SingleLiveEvent<WebTab>()
 
+    var tabId: String = ""
+
+    var sessionSink: TabSessionSink? = null
+
+    private var started = false
+
     private val tabUrl = ObservableField("")
     private var tabSuggestionJob: Job? = null
 
@@ -61,18 +68,23 @@ class WebTabViewModel @Inject constructor(
     }
 
     override fun start() {
+        if (started) return
+        started = true
         tabPublishSubject = PublishSubject.create()
 
         isShowProgress.addOnPropertyChangedCallback(showProgressCallBack)
     }
 
     override fun stop() {
+        if (!started) return
+        started = false
         isShowProgress.removeOnPropertyChangedCallback(showProgressCallBack)
     }
 
     fun finishPage(url: String) {
         setTabTextInput(url, true)
         isShowProgress.set(false)
+        sessionSink?.onLoading(tabId, 100, false)
     }
 
     fun onStartPage(url: String, title: String?) {
@@ -80,6 +92,8 @@ class WebTabViewModel @Inject constructor(
         isShowProgress.set(true)
         currentTitle.set(title)
         tabUrl.set(url)
+        sessionSink?.onNavigated(tabId, url, title)
+        sessionSink?.onLoading(tabId, progress.get(), true)
     }
 
     fun onUpdateVisitedHistory(url: String, title: String?, userAgent: String?) {
@@ -87,6 +101,8 @@ class WebTabViewModel @Inject constructor(
             setTabTextInput(url)
             isShowProgress.set(true)
             tabUrl.set(url)
+            currentTitle.set(title)
+            sessionSink?.onNavigated(tabId, url, title)
         }
     }
 
@@ -195,5 +211,6 @@ class WebTabViewModel @Inject constructor(
 
     fun setProgress(newProgress: Int) {
         progress.set(newProgress)
+        sessionSink?.onLoading(tabId, newProgress, newProgress < 100)
     }
 }
